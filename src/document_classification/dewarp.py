@@ -79,6 +79,68 @@ def find_corners_opencv(image_bgr: np.ndarray) -> np.ndarray | None:
     return None
 
 
+def find_corners_segment(image_bgr: np.ndarray) -> np.ndarray | None:
+    """Segment the page from a busy/coloured background, then fit its quad.
+
+    Robust fallback for photos where edge+contour detection fails (textured
+    backgrounds, low-contrast paper edges). The page is usually far less
+    saturated than a colourful background, so we threshold the HSV saturation to
+    isolate it, then fit a 4-point contour or a rotated rectangle (which also
+    corrects tilt). Returns corners in original-image coordinates, or None.
+    """
+    h, w = image_bgr.shape[:2]
+    scale = 1000.0 / max(h, w)
+    small = cv2.resize(image_bgr, None, fx=scale, fy=scale) if scale < 1 else image_bgr.copy()
+    resize_factor = small.shape[1] / w
+    img_area = small.shape[0] * small.shape[1]
+
+    # Two complementary cues for "paper vs colourful background":
+    #  * low saturation (paper is greyer than a coloured background)
+    #  * warm tone   — LAB b-channel is high for cream/white paper, low for blue.
+    # Combine whichever separates best (Otsu on each), keep the brighter side.
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
+    sat, val, b = hsv[:, :, 1], hsv[:, :, 2], lab[:, :, 2]
+
+    low_sat = cv2.threshold(sat, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    warm = cv2.threshold(b, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    bright = cv2.threshold(val, 60, 255, cv2.THRESH_BINARY)[1]
+
+    # Close aggressively to bridge holes (logos, coloured stamps, smudges) so the
+    # page becomes one solid blob.
+    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35))
+    open_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    best = None
+    for cue in (cv2.bitwise_and(warm, bright), cv2.bitwise_and(low_sat, bright)):
+        mask = cv2.morphologyEx(cue, cv2.MORPH_OPEN, open_k)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        # Must be a real region, but not (nearly) the whole frame — that means the
+        # cue failed to isolate the page from the background.
+        if area < 0.15 * img_area or area > 0.9 * img_area:
+            continue
+        # How rectangular is the blob? A page fills most of its rotated bbox.
+        rect = cv2.minAreaRect(cnt)
+        rect_area = rect[1][0] * rect[1][1]
+        fill = area / rect_area if rect_area else 0.0
+        if fill < 0.6:  # too ragged to be a page
+            continue
+        if best is None or fill > best[0]:  # prefer the most rectangular candidate
+            best = (fill, rect)
+
+    if best is None:
+        return None
+
+    # A rotated bounding rectangle is stable on a blobby mask and also corrects
+    # tilt (a sideways photo comes out straight).
+    box = cv2.boxPoints(best[1])
+    return box.astype(np.float32) / resize_factor
+
+
 # --------------------------------------------------------------------------- #
 # CNN corner detection (optional weights)
 # --------------------------------------------------------------------------- #
@@ -157,6 +219,12 @@ def dewarp(image_bgr: np.ndarray, base_dir: Path, device: str = "cpu") -> dict:
         corners = find_corners_opencv(image_bgr)
         if corners is not None:
             method = "opencv"
+
+    if corners is None:
+        # Edge detection failed (e.g. busy background): try page segmentation.
+        corners = find_corners_segment(image_bgr)
+        if corners is not None:
+            method = "opencv-seg"
 
     if corners is None:
         # No document boundary found: use the full frame.
