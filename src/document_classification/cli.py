@@ -1,4 +1,4 @@
-"""Command-line interface: scan an image and classify its document type."""
+"""Command-line interface: scan images/PDFs and classify their document type."""
 from __future__ import annotations
 
 import argparse
@@ -8,48 +8,79 @@ from pathlib import Path
 
 import cv2
 
-from .pipeline import ImageDecodeError, process_path
+from .exports import OcrUnavailable, extract_text, searchable_pdf
+from .pipeline import ImageDecodeError, ScanResult, pdf_to_images, process_image
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="docscan",
-        description="Dewarp, denoise and classify a document photo.",
+def _iter_inputs(paths: list[Path]) -> list[Path]:
+    """Expand directories to their image/PDF files; keep files as given."""
+    out: list[Path] = []
+    for p in paths:
+        if p.is_dir():
+            out.extend(sorted(
+                f for f in p.iterdir()
+                if f.suffix.lower() in IMAGE_EXTS or f.suffix.lower() == ".pdf"
+            ))
+        else:
+            out.append(p)
+    return out
+
+
+def _pages_from_path(path: Path):
+    """Yield (label, bgr_image) for each page: PDFs expand, images pass through."""
+    if path.suffix.lower() == ".pdf":
+        for i, img in enumerate(pdf_to_images(path.read_bytes()), 1):
+            yield f"{path.stem}_p{i}", img
+    else:
+        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if img is None:
+            raise ImageDecodeError(f"Could not decode '{path.name}' as an image.")
+        yield path.stem, img
+
+
+def _print_human(payload: dict) -> None:
+    cat = f" [{payload['category']}]" if payload.get("category") else ""
+    print(f"\n{payload['input']}")
+    print(f"Category      : {payload['category'] or 'n/a'} "
+          f"({payload['category_confidence']*100:.1f}%)")
+    flag = "  (uncertain — trust the category)" if payload["uncertain"] else ""
+    print(f"Document type : {payload['document_type']}{cat}  "
+          f"({payload['confidence']*100:.1f}% via {payload['classifier']}){flag}")
+    if payload["top_k"]:
+        print("Top guesses   :")
+        for item in payload["top_k"]:
+            icat = f" [{item.get('category','')}]" if item.get("category") else ""
+            print(f"   - {item['label']:<22}{icat:<24} {item['score']*100:5.1f}%")
+    print(f"Scan          : {payload['outputs']['scan']}")
+
+
+def _handle_one(label: str, img, args, outdir: Path) -> dict:
+    result: ScanResult = process_image(
+        img, classify_type=not args.no_classify, binarize=args.bw
     )
-    parser.add_argument("image", help="Path to the input document photo")
-    parser.add_argument(
-        "-o", "--outdir", default="output", help="Directory for output images (default: output/)"
-    )
-    parser.add_argument(
-        "--no-classify", action="store_true", help="Skip document-type classification"
-    )
-    parser.add_argument("--json", action="store_true", help="Print result as JSON")
-    parser.add_argument(
-        "--bw", action="store_true",
-        help="Pure black & white scan instead of clean grayscale (smaller, can break logos)",
-    )
-    args = parser.parse_args()
-
-    in_path = Path(args.image)
-    if not in_path.exists():
-        parser.error(f"Image not found: {in_path}")
-
-    try:
-        result = process_path(in_path, classify_type=not args.no_classify, binarize=args.bw)
-    except ImageDecodeError as e:
-        print(f"error: {e}", file=sys.stderr)
-        raise SystemExit(2) from e
-
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-    stem = in_path.stem
-    flat_path = outdir / f"{stem}_flattened.png"
-    clean_path = outdir / f"{stem}_scan.png"
+    flat_path = outdir / f"{label}_flattened.png"
+    clean_path = outdir / f"{label}_scan.png"
     cv2.imwrite(str(flat_path), result.flattened)
     cv2.imwrite(str(clean_path), result.cleaned)
 
-    payload = {
-        "input": str(in_path),
+    outputs = {"flattened": str(flat_path), "scan": str(clean_path)}
+    if args.searchable_pdf or args.text:
+        try:
+            if args.searchable_pdf:
+                pdf_path = outdir / f"{label}.pdf"
+                pdf_path.write_bytes(searchable_pdf(result.cleaned))
+                outputs["searchable_pdf"] = str(pdf_path)
+            if args.text:
+                txt_path = outdir / f"{label}.txt"
+                txt_path.write_text(extract_text(result.cleaned))
+                outputs["text"] = str(txt_path)
+        except OcrUnavailable as e:
+            print(f"warning: {e}", file=sys.stderr)
+
+    return {
+        "input": label,
         "category": result.category,
         "category_confidence": round(result.category_confidence, 4),
         "document_type": result.doc_type,
@@ -60,28 +91,56 @@ def main() -> None:
         "classifier": result.classification.get("method", "n/a"),
         "dewarp_method": result.dewarp_method,
         "denoise_method": result.denoise_method,
-        "outputs": {"flattened": str(flat_path), "scan": str(clean_path)},
+        "outputs": outputs,
     }
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="docscan",
+        description="Dewarp, denoise and classify document photos or PDFs.",
+    )
+    parser.add_argument("inputs", nargs="+", help="Image/PDF files or directories")
+    parser.add_argument("-o", "--outdir", default="output",
+                        help="Directory for output files (default: output/)")
+    parser.add_argument("--no-classify", action="store_true",
+                        help="Skip document-type classification")
+    parser.add_argument("--json", action="store_true", help="Print results as JSON")
+    parser.add_argument("--bw", action="store_true",
+                        help="Pure black & white scan instead of clean grayscale")
+    parser.add_argument("--searchable-pdf", action="store_true",
+                        help="Also write a searchable PDF (OCR text layer; needs Tesseract)")
+    parser.add_argument("--text", action="store_true",
+                        help="Also write extracted OCR text (.txt; needs Tesseract)")
+    args = parser.parse_args()
+
+    paths = [Path(p) for p in args.inputs]
+    missing = [p for p in paths if not p.exists()]
+    if missing:
+        parser.error(f"Not found: {', '.join(str(m) for m in missing)}")
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    payloads: list[dict] = []
+    exit_code = 0
+    for path in _iter_inputs(paths):
+        try:
+            for label, img in _pages_from_path(path):
+                payloads.append(_handle_one(label, img, args, outdir))
+        except ImageDecodeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            exit_code = 2
+
     if args.json:
-        print(json.dumps(payload, indent=2))
+        print(json.dumps(payloads if len(payloads) != 1 else payloads[0], indent=2))
     else:
-        cat = f" [{payload['category']}]" if payload.get("category") else ""
-        print(f"\nCategory      : {payload['category'] or 'n/a'} "
-              f"({payload['category_confidence']*100:.1f}%)")
-        flag = "  (uncertain — trust the category)" if payload["uncertain"] else ""
-        print(f"Document type : {payload['document_type']}{cat}  "
-              f"({payload['confidence']*100:.1f}% via {payload['classifier']}){flag}")
-        if payload["top_k"]:
-            print("Top guesses   :")
-            for item in payload["top_k"]:
-                icat = f" [{item.get('category','')}]" if item.get("category") else ""
-                print(f"   - {item['label']:<22}{icat:<24} {item['score']*100:5.1f}%")
-        print(f"Dewarp        : {payload['dewarp_method']}")
-        print(f"Denoise       : {payload['denoise_method']}")
-        print(f"Flattened     : {flat_path}")
-        print(f"Scan          : {clean_path}\n")
+        for payload in payloads:
+            _print_human(payload)
+        print()
+
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

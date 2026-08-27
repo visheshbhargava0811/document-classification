@@ -9,6 +9,7 @@ from document_classification.pipeline import (
     ImageDecodeError,
     ScanResult,
     decode_image_bytes,
+    pdf_to_images,
     process_image,
 )
 
@@ -47,3 +48,19 @@ def test_decode_image_bytes_rejects_garbage():
 def test_decode_image_bytes_rejects_empty():
     with pytest.raises(ImageDecodeError):
         decode_image_bytes(b"")
+
+
+def test_pdf_to_images_renders_pages():
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    doc.new_page()
+    doc.new_page()
+    data = doc.tobytes()
+    pages = pdf_to_images(data, dpi=72)
+    assert len(pages) == 2
+    assert all(p.ndim == 3 and p.dtype == np.uint8 for p in pages)
+
+
+def test_pdf_to_images_rejects_non_pdf():
+    with pytest.raises(ImageDecodeError):
+        pdf_to_images(b"not a pdf")

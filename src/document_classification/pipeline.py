@@ -145,3 +145,37 @@ def process_image(
 
 def process_path(path: str | Path, **kwargs) -> ScanResult:
     return process_image(load_image(path), **kwargs)
+
+
+def pdf_to_images(data: bytes, dpi: int = 200, max_pages: int = 50) -> list[np.ndarray]:
+    """Render a PDF (given as bytes) to a list of BGR page images via PyMuPDF.
+
+    PyMuPDF ships as a self-contained wheel (no system dependency), so this works
+    on Streamlit Community Cloud without extra packages.
+    """
+    import pymupdf  # (a.k.a. fitz)
+
+    images: list[np.ndarray] = []
+    zoom = dpi / 72.0
+    matrix = pymupdf.Matrix(zoom, zoom)
+    try:
+        doc = pymupdf.open(stream=data, filetype="pdf")
+    except Exception as e:
+        raise ImageDecodeError("Could not open this file as a PDF.") from e
+    with doc:
+        for page in doc:
+            if len(images) >= max_pages:
+                break
+            pix = page.get_pixmap(matrix=matrix)
+            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:  # RGBA
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+            elif pix.n == 3:  # RGB
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            else:  # grayscale
+                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+            _check_size(arr)
+            images.append(arr)
+    if not images:
+        raise ImageDecodeError("The PDF has no rendered pages.")
+    return images
