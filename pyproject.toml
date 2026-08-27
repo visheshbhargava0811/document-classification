@@ -26,6 +26,7 @@ ocr = ["pytesseract>=0.3.10"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "matplotlib>=3.7",
 ]
 
 [project.scripts]
