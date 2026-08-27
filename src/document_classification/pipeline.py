@@ -38,6 +38,23 @@ class ScanResult:
     def confidence(self) -> float:
         return float(self.classification.get("confidence", 0.0))
 
+    @property
+    def category_confidence(self) -> float:
+        return float(self.classification.get("category_confidence", 0.0))
+
+    @property
+    def uncertain(self) -> bool:
+        return bool(self.classification.get("uncertain", False))
+
+    @property
+    def display_type(self) -> str:
+        """Human-facing type: category-only when the specific type is uncertain."""
+        if not self.classification:
+            return "unknown"
+        if self.uncertain and self.category:
+            return f"{self.category} (type uncertain)"
+        return self.doc_type
+
 
 def _pick_device() -> str:
     try:

@@ -46,9 +46,12 @@ def main() -> None:
 
     payload = {
         "input": str(in_path),
-        "document_type": result.doc_type,
         "category": result.category,
+        "category_confidence": round(result.category_confidence, 4),
+        "document_type": result.doc_type,
         "confidence": round(result.confidence, 4),
+        "uncertain": result.uncertain,
+        "display_type": result.display_type,
         "top_k": result.classification.get("top_k", []),
         "classifier": result.classification.get("method", "n/a"),
         "dewarp_method": result.dewarp_method,
@@ -60,8 +63,11 @@ def main() -> None:
         print(json.dumps(payload, indent=2))
     else:
         cat = f" [{payload['category']}]" if payload.get("category") else ""
-        print(f"\nDocument type : {payload['document_type']}{cat}  "
-              f"({payload['confidence']*100:.1f}% via {payload['classifier']})")
+        print(f"\nCategory      : {payload['category'] or 'n/a'} "
+              f"({payload['category_confidence']*100:.1f}%)")
+        flag = "  (uncertain — trust the category)" if payload["uncertain"] else ""
+        print(f"Document type : {payload['document_type']}{cat}  "
+              f"({payload['confidence']*100:.1f}% via {payload['classifier']}){flag}")
         if payload["top_k"]:
             print("Top guesses   :")
             for item in payload["top_k"]:

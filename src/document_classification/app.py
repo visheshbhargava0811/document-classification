@@ -68,14 +68,21 @@ cls = res["classification"]
 label = cls.get("label", "unknown")
 category = cls.get("category", "")
 conf = cls.get("confidence", 0.0)
+cat_conf = cls.get("category_confidence", 0.0)
+uncertain = cls.get("uncertain", False)
 method = cls.get("method", "n/a")
 
 st.subheader("Result")
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Category", category or "—")
-c2.metric("Document type", label)
+c1.metric("Category", category or "—", help=f"{cat_conf*100:.1f}% confident")
+c2.metric("Document type", label if not uncertain else "—",
+          help="Specific type is uncertain — trust the category." if uncertain else None)
 c3.metric("Confidence", f"{conf*100:.1f}%")
 c4.metric("Classifier", method)
+
+if uncertain:
+    st.info(f"The category **{category}** is a confident call, but the specific "
+            f"type is ambiguous here — treat the top guess below as a hint.")
 
 if cls.get("top_k"):
     st.write("**Top guesses**")
