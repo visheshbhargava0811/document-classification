@@ -8,7 +8,7 @@ what kind of document it is — across an **8-category, 43-type** taxonomy
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%E2%80%933.13-blue)
 
-![Pipeline: detect page → flatten → clean scan → classify](docs/pipeline.png)
+![Demo: upload a receipt → detect, flatten, clean, and classify it](docs/demo.gif)
 
 It grew out of a deep-learning course project (corner detection + dewarping +
 denoising) and adds a document-type classifier plus a real, runnable app — a
@@ -39,6 +39,8 @@ flowchart LR
     C --> D[3 Classify type<br/>CLIP zero-shot + OCR fusion]
     D --> E[Category → Type<br/>+ confidence]
 ```
+
+![Pipeline stages: detected page, flattened, cleaned scan, with the result](docs/pipeline.png)
 
 1. **Dewarp** — finds the document's four corners and perspective-corrects it.
    Uses the trained `DocumentCornerModel` CNN if `dl_project_doc_extract_weights.pt`
