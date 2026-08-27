@@ -7,7 +7,6 @@ crisp scan-like image.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -15,7 +14,7 @@ import numpy as np
 DENOISE_WEIGHTS_CANDIDATES = ("model.pt", "weights/model.pt")
 
 
-def resolve_denoise_weights(base_dir: Path) -> Optional[str]:
+def resolve_denoise_weights(base_dir: Path) -> str | None:
     for cand in DENOISE_WEIGHTS_CANDIDATES:
         p = base_dir / cand
         if p.exists():

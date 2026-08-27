@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install project (with dev + ocr extras)
+        run: uv sync --extra ocr
+
+      - name: Lint (ruff)
+        run: uv run ruff check src tests
+
+      - name: Test (fast, no model download)
+        run: uv run pytest -q -m "not slow"

@@ -11,7 +11,6 @@ perspective transform to un-skew the page.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -56,7 +55,7 @@ def warp_to_corners(image_bgr: np.ndarray, corners: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # Classic OpenCV corner detection
 # --------------------------------------------------------------------------- #
-def find_corners_opencv(image_bgr: np.ndarray) -> Optional[np.ndarray]:
+def find_corners_opencv(image_bgr: np.ndarray) -> np.ndarray | None:
     """Find the document quadrilateral using edges + contours. May return None."""
     h, w = image_bgr.shape[:2]
     scale = 1000.0 / max(h, w)
@@ -83,7 +82,7 @@ def find_corners_opencv(image_bgr: np.ndarray) -> Optional[np.ndarray]:
 # --------------------------------------------------------------------------- #
 # CNN corner detection (optional weights)
 # --------------------------------------------------------------------------- #
-def find_corners_cnn(image_bgr: np.ndarray, weights_path: str, device: str = "cpu") -> Optional[np.ndarray]:
+def find_corners_cnn(image_bgr: np.ndarray, weights_path: str, device: str = "cpu") -> np.ndarray | None:
     import torch
     from torchvision import transforms
 
@@ -132,7 +131,7 @@ def find_corners_cnn(image_bgr: np.ndarray, weights_path: str, device: str = "cp
     return corners
 
 
-def resolve_corner_weights(base_dir: Path) -> Optional[str]:
+def resolve_corner_weights(base_dir: Path) -> str | None:
     for cand in CORNER_WEIGHTS_CANDIDATES:
         p = base_dir / cand
         if p.exists():
@@ -143,7 +142,7 @@ def resolve_corner_weights(base_dir: Path) -> Optional[str]:
 def dewarp(image_bgr: np.ndarray, base_dir: Path, device: str = "cpu") -> dict:
     """Return dict with flattened image, the corners used, and which method won."""
     weights = resolve_corner_weights(base_dir)
-    corners: Optional[np.ndarray] = None
+    corners: np.ndarray | None = None
     method = "none"
 
     if weights:

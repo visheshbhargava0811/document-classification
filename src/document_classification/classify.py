@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
-from typing import Optional
 
 import numpy as np
 
@@ -166,7 +165,7 @@ def _text_features():
     return text_emb, owners, logit_scale
 
 
-def _clip_label_logits(image_rgb: np.ndarray) -> Optional[dict[str, float]]:
+def _clip_label_logits(image_rgb: np.ndarray) -> dict[str, float] | None:
     """Per-leaf CLIP logit (max-pooled over the prompt ensemble). None if no CLIP."""
     loaded = _load_clip()
     feats = _text_features()
@@ -184,7 +183,7 @@ def _clip_label_logits(image_rgb: np.ndarray) -> Optional[dict[str, float]]:
     logits = (logit_scale * img_emb @ text_emb.T).squeeze(0).tolist()
 
     per_label: dict[str, float] = {}
-    for owner, logit in zip(owners, logits):
+    for owner, logit in zip(owners, logits, strict=True):
         per_label[owner] = max(per_label.get(owner, -1e9), logit)
     return per_label
 
@@ -209,7 +208,7 @@ def _finalize(label_logits: dict[str, float], method: str, top_k: int) -> dict:
     labels = list(DOCUMENT_TYPES.keys())
     logits = np.array([label_logits.get(lbl, -1e9) for lbl in labels], dtype=np.float64)
     leaf_probs = _softmax(logits)
-    leaf_prob = dict(zip(labels, leaf_probs))
+    leaf_prob = dict(zip(labels, leaf_probs, strict=True))
 
     # Category distribution: each category scored by its strongest leaf.
     categories = list(TAXONOMY.keys())
@@ -246,7 +245,7 @@ def _finalize(label_logits: dict[str, float], method: str, top_k: int) -> dict:
     }
 
 
-def classify_clip(image_rgb: np.ndarray, top_k: int = 5) -> Optional[dict]:
+def classify_clip(image_rgb: np.ndarray, top_k: int = 5) -> dict | None:
     """Pure-CLIP classification (no OCR fusion). None if CLIP is unavailable."""
     label_logits = _clip_label_logits(image_rgb)
     if label_logits is None:

@@ -16,10 +16,17 @@ dependencies = [
     "streamlit>=1.36",
     "transformers>=4.40",
     "safetensors>=0.4",
+    "pymupdf>=1.24",
 ]
 
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
 
 [project.scripts]
 document-classification = "document_classification.cli:main"
@@ -29,3 +36,18 @@ document-classification-web = "document_classification.web:main"
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # line length handled by formatter; long prompt strings are fine
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: tests that download the CLIP model or otherwise run slowly (deselect with -m 'not slow')",
+]

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 
-from .pipeline import process_path
+from .pipeline import ImageDecodeError, process_path
 
 
 def main() -> None:
@@ -34,7 +34,11 @@ def main() -> None:
     if not in_path.exists():
         parser.error(f"Image not found: {in_path}")
 
-    result = process_path(in_path, classify_type=not args.no_classify, binarize=args.bw)
+    try:
+        result = process_path(in_path, classify_type=not args.no_classify, binarize=args.bw)
+    except ImageDecodeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)

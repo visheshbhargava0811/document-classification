@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -69,18 +68,56 @@ def _pick_device() -> str:
     return "cpu"
 
 
+class ImageDecodeError(ValueError):
+    """Raised when input bytes/file cannot be decoded as an image."""
+
+
+# Guard against absurdly large uploads (decompression bombs / accidental huge files).
+MAX_IMAGE_PIXELS = 60_000_000  # ~60 MP
+
+
 def load_image(path: str | Path) -> np.ndarray:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {path}")
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if img is None:
-        raise FileNotFoundError(f"Could not read image: {path}")
+        raise ImageDecodeError(
+            f"Could not decode '{path.name}' as an image. "
+            "Supported: JPG, PNG, BMP, WEBP. (For PDFs, render pages to images first.)"
+        )
+    _check_size(img)
     return img
+
+
+def decode_image_bytes(data: bytes) -> np.ndarray:
+    """Decode raw image bytes to a BGR array, with friendly errors. Used by the UI."""
+    if not data:
+        raise ImageDecodeError("The uploaded file is empty.")
+    arr = np.frombuffer(data, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ImageDecodeError(
+            "Could not decode this file as an image (JPG, PNG, BMP, or WEBP)."
+        )
+    _check_size(img)
+    return img
+
+
+def _check_size(img: np.ndarray) -> None:
+    h, w = img.shape[:2]
+    if h * w > MAX_IMAGE_PIXELS:
+        raise ImageDecodeError(
+            f"Image is too large ({w}x{h}, {h * w / 1e6:.0f} MP). "
+            f"Please downscale to under {MAX_IMAGE_PIXELS // 1_000_000} MP."
+        )
 
 
 def process_image(
     image_bgr: np.ndarray,
-    weights_dir: Optional[Path] = None,
+    weights_dir: Path | None = None,
     classify_type: bool = True,
-    device: Optional[str] = None,
+    device: str | None = None,
     binarize: bool = False,
 ) -> ScanResult:
     weights_dir = Path(weights_dir) if weights_dir else DEFAULT_WEIGHTS_DIR
