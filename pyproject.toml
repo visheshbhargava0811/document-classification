@@ -1,0 +1,31 @@
+[project]
+name = "document-classification"
+version = "0.1.0"
+description = "Scan, dewarp, denoise and classify document photos (receipt, handwritten note, invoice, ID, ...)."
+readme = "README.md"
+authors = [
+    { name = "Vishesh Bhargava", email = "vishub0811@gmail.com" }
+]
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "opencv-python-headless>=4.9",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "streamlit>=1.36",
+    "transformers>=4.40",
+    "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+ocr = ["pytesseract>=0.3.10"]
+
+[project.scripts]
+document-classification = "document_classification.cli:main"
+docscan = "document_classification.cli:main"
+document-classification-web = "document_classification.web:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"

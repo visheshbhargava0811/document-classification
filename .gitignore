@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+output/
+.DS_Store
+*.pt
+!.gitkeep
+sample_receipt.jpg
+
+# tooling / build caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# eval run artifacts (keep the script + curated inputs, not outputs)
+eval/results/
