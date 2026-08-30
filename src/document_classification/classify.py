@@ -18,10 +18,18 @@ cached with ``lru_cache`` and survive across Streamlit reruns.
 """
 from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
 
 import numpy as np
+
+# Which OCR engine feeds the keyword-fusion / offline classifier. Tesseract is
+# the default (light, works on Streamlit Cloud); "surya" is an opt-in, heavier
+# transformer engine (better on skewed/low-quality photos). Overridable per call
+# or via the DOC_OCR_ENGINE env var. Surya is *not* used for searchable-PDF
+# export — that stays on Tesseract in exports.py.
+DEFAULT_OCR_ENGINE = os.environ.get("DOC_OCR_ENGINE", "tesseract").lower()
 
 # Hierarchical taxonomy: category -> {leaf label -> prompt phrasings}.
 # An ensemble of phrasings per label improves CLIP zero-shot accuracy. Edit this
@@ -281,14 +289,216 @@ _KEYWORDS = {
 }
 
 
-def _ocr_text(image_rgb: np.ndarray) -> str:
+@lru_cache(maxsize=1)
+def _load_surya():
+    """Load and cache Surya's detection + recognition predictors. None on failure.
+
+    Surya's public API has shifted across releases; we import lazily and treat any
+    import/construction error as "unavailable" so callers fall back to Tesseract.
+    """
+    try:
+        from surya.detection import DetectionPredictor
+        from surya.recognition import RecognitionPredictor
+
+        return RecognitionPredictor(), DetectionPredictor()
+    except Exception:
+        return None
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _surya_pred_text(pred) -> str:
+    """Pull joined text out of a Surya prediction across its shifting result shapes.
+
+    Newer Surya (layout-aware) returns a ``PageOCRResult`` with ``.blocks``, each
+    carrying an ``.html`` snippet (e.g. ``<h2>RECEIPT</h2>``); older builds returned
+    ``.text_lines`` with a plain ``.text`` per line. Handle both.
+    """
+    import html as _html
+
+    blocks = getattr(pred, "blocks", None)
+    if blocks:
+        ordered = sorted(blocks, key=lambda b: getattr(b, "reading_order", 0) or 0)
+        parts = []
+        for b in ordered:
+            snippet = getattr(b, "html", "") or ""
+            text = _html.unescape(_HTML_TAG_RE.sub(" ", snippet)).strip()
+            if text:
+                parts.append(" ".join(text.split()))
+        return "\n".join(parts)
+    lines = getattr(pred, "text_lines", None)
+    if lines:
+        return "\n".join(getattr(ln, "text", "") for ln in lines)
+    return ""
+
+
+def _round(v, n: int = 4):
+    """Round a float (or list/tuple of numbers, recursively); pass others through."""
+    if isinstance(v, (int, float)):
+        return round(float(v), n)
+    if isinstance(v, (list, tuple)):
+        return [_round(x, n) for x in v]
+    return v
+
+
+def _surya_predict(image_rgb: np.ndarray):
+    """Run Surya OCR and return the raw prediction object, or None on failure.
+
+    Centralises the call so text and structured-JSON extraction share one run.
+    """
+    loaded = _load_surya()
+    if loaded is None:
+        return None
+    recognition, detection = loaded
+    try:
+        from PIL import Image
+
+        image = Image.fromarray(image_rgb)
+        # Surya's recognition signature has changed across releases; try the
+        # variants newest-first and fall back on TypeError.
+        try:
+            return recognition([image], full_page=True)[0]           # layout-aware builds
+        except TypeError:
+            try:
+                return recognition([image], det_predictor=detection)[0]  # mid-era builds
+            except TypeError:
+                return recognition([image], [None], detection)[0]        # oldest builds
+    except Exception:
+        return None
+
+
+def _surya_pred_json(pred) -> list[dict]:
+    """Structured per-region OCR: text + bbox + confidence + label + reading order.
+
+    This is the machine-readable output of the Surya model that the joined text
+    string discards. Handles both the layout-aware ``.blocks`` API and the older
+    ``.text_lines`` API.
+    """
+    import html as _html
+
+    out: list[dict] = []
+    blocks = getattr(pred, "blocks", None)
+    if blocks:
+        for b in sorted(blocks, key=lambda b: getattr(b, "reading_order", 0) or 0):
+            snippet = getattr(b, "html", "") or ""
+            text = " ".join(_html.unescape(_HTML_TAG_RE.sub(" ", snippet)).split())
+            out.append(
+                {
+                    "text": text,
+                    "label": getattr(b, "label", None),
+                    "confidence": _round(getattr(b, "confidence", None)),
+                    "bbox": _round(getattr(b, "bbox", None), 1),
+                    "reading_order": getattr(b, "reading_order", None),
+                }
+            )
+        return out
+    lines = getattr(pred, "text_lines", None)
+    if lines:
+        for ln in lines:
+            out.append(
+                {
+                    "text": getattr(ln, "text", ""),
+                    "confidence": _round(getattr(ln, "confidence", None)),
+                    "bbox": _round(getattr(ln, "bbox", None), 1),
+                }
+            )
+    return out
+
+
+def _surya_text(image_rgb: np.ndarray, lower: bool = True) -> str:
+    """OCR via Surya, returning joined text (lowercased by default). "" if failed.
+
+    Pass ``lower=False`` to keep the original casing and layout — needed for
+    downstream extraction/summarisation, where "$Total" vs "subtotal" matters.
+    """
+    pred = _surya_predict(image_rgb)
+    if pred is None:
+        return ""
+    text = _surya_pred_text(pred)
+    return text.lower() if lower else text
+
+
+def _tesseract_extract(image_rgb: np.ndarray) -> dict:
+    """OCR via Tesseract, returning both joined text and per-word boxes."""
     try:
         import pytesseract
         from PIL import Image
 
-        return pytesseract.image_to_string(Image.fromarray(image_rgb)).lower()
+        pil = Image.fromarray(image_rgb)
+        data = pytesseract.image_to_data(pil, output_type=pytesseract.Output.DICT)
+        blocks: list[dict] = []
+        for i in range(len(data["text"])):
+            word = (data["text"][i] or "").strip()
+            if not word:
+                continue
+            conf = data.get("conf", ["-1"])[i]
+            try:
+                conf = round(float(conf) / 100.0, 4)
+            except (TypeError, ValueError):
+                conf = None
+            x, y, w, h = (data["left"][i], data["top"][i], data["width"][i], data["height"][i])
+            blocks.append({"text": word, "confidence": conf, "bbox": [x, y, x + w, y + h]})
+        text = pytesseract.image_to_string(pil)
+        return {"engine": "tesseract", "text": text, "blocks": blocks}
+    except Exception:
+        return {"engine": "none", "text": "", "blocks": []}
+
+
+def _tesseract_text(image_rgb: np.ndarray, lower: bool = True) -> str:
+    try:
+        import pytesseract
+        from PIL import Image
+
+        text = pytesseract.image_to_string(Image.fromarray(image_rgb))
+        return text.lower() if lower else text
     except Exception:
         return ""
+
+
+def _ocr_text(image_rgb: np.ndarray, engine: str | None = None, lower: bool = True) -> str:
+    """OCR the image to text using the selected engine, with fallback.
+
+    ``engine`` is "tesseract" (default) or "surya"; None uses ``DEFAULT_OCR_ENGINE``.
+    Surya falls back to Tesseract when it is not installed or errors, so callers
+    never have to handle an unavailable engine. Text is lowercased unless
+    ``lower=False`` (keyword-fusion wants lowercase; extraction wants raw casing).
+    """
+    engine = (engine or DEFAULT_OCR_ENGINE).lower()
+    if engine == "surya":
+        text = _surya_text(image_rgb, lower=lower)
+        if text.strip():
+            return text
+        return _tesseract_text(image_rgb, lower=lower)  # graceful fallback
+    return _tesseract_text(image_rgb, lower=lower)
+
+
+def ocr_raw_text(image_rgb: np.ndarray, engine: str | None = None) -> str:
+    """Public: OCR the image to case-preserving text for extraction/summarisation.
+
+    Unlike the internal keyword-fusion path, this keeps original casing and line
+    breaks so that receipt totals, dates, and proper nouns survive intact.
+    """
+    return _ocr_text(image_rgb, engine=engine, lower=False)
+
+
+def ocr_extract(image_rgb: np.ndarray, engine: str | None = None) -> dict:
+    """Public: OCR the image once, returning BOTH plain text and structured JSON.
+
+    Returns ``{"engine": str, "text": str, "blocks": [...]}`` where each block has
+    ``text``, ``confidence``, ``bbox`` (and ``label``/``reading_order`` for Surya).
+    Surya is preferred when selected and falls back to Tesseract if it yields
+    nothing; the ``engine`` field reports which engine actually produced the result.
+    """
+    engine = (engine or DEFAULT_OCR_ENGINE).lower()
+    if engine == "surya":
+        pred = _surya_predict(image_rgb)
+        if pred is not None:
+            text = _surya_pred_text(pred)
+            if text.strip():
+                return {"engine": "surya", "text": text, "blocks": _surya_pred_json(pred)}
+        return _tesseract_extract(image_rgb)  # graceful fallback
+    return _tesseract_extract(image_rgb)
 
 
 def _ocr_label_scores(text: str) -> dict[str, int]:
@@ -303,9 +513,9 @@ def _ocr_label_scores(text: str) -> dict[str, int]:
     return scores
 
 
-def classify_ocr(image_rgb: np.ndarray, top_k: int = 5) -> dict:
+def classify_ocr(image_rgb: np.ndarray, top_k: int = 5, ocr_engine: str | None = None) -> dict:
     """Offline classifier using only OCR keyword signals."""
-    text = _ocr_text(image_rgb)
+    text = _ocr_text(image_rgb, engine=ocr_engine)
     if not text.strip():
         return {
             "method": "ocr",
@@ -359,7 +569,7 @@ def _handwritten_ratio(text: str) -> float:
 # Orchestration
 # --------------------------------------------------------------------------- #
 def classify(image_rgb: np.ndarray, top_k: int = 5, prefer: str = "clip",
-             use_ocr: bool = True) -> dict:
+             use_ocr: bool = True, ocr_engine: str | None = None) -> dict:
     """Classify the document type.
 
     Uses CLIP when available, fuses OCR keyword signals into the CLIP scores when
@@ -373,10 +583,12 @@ def classify(image_rgb: np.ndarray, top_k: int = 5, prefer: str = "clip",
         if label_logits is not None:
             method = "clip"
             if use_ocr:
-                ocr_scores = _ocr_label_scores(_ocr_text(image_rgb))
+                text = _ocr_text(image_rgb, engine=ocr_engine)
+                ocr_scores = _ocr_label_scores(text)
                 if ocr_scores:
                     for lbl, hits in ocr_scores.items():
                         label_logits[lbl] = label_logits.get(lbl, 0.0) + OCR_BOOST * hits
-                    method = "clip+ocr"
+                    engine = (ocr_engine or DEFAULT_OCR_ENGINE).lower()
+                    method = f"clip+ocr:{engine}" if engine == "surya" else "clip+ocr"
             return _finalize(label_logits, method=method, top_k=top_k)
-    return classify_ocr(image_rgb, top_k=top_k)
+    return classify_ocr(image_rgb, top_k=top_k, ocr_engine=ocr_engine)

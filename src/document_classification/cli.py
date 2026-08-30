@@ -53,12 +53,22 @@ def _print_human(payload: dict) -> None:
         for item in payload["top_k"]:
             icat = f" [{item.get('category','')}]" if item.get("category") else ""
             print(f"   - {item['label']:<22}{icat:<24} {item['score']*100:5.1f}%")
+    u = payload.get("understanding")
+    if u and (u.get("summary") or u.get("fields")):
+        if u.get("summary"):
+            print(f"Summary       : {u['summary']}")
+        for pt in u.get("key_points") or []:
+            print(f"   • {pt}")
+        if u.get("fields"):
+            pairs = ", ".join(f"{k}={v}" for k, v in u["fields"].items())
+            print(f"Fields        : {pairs}")
     print(f"Scan          : {payload['outputs']['scan']}")
 
 
 def _handle_one(label: str, img, args, outdir: Path) -> dict:
     result: ScanResult = process_image(
-        img, classify_type=not args.no_classify, binarize=args.bw
+        img, classify_type=not args.no_classify, binarize=args.bw,
+        ocr_engine=args.ocr_engine, understand=args.summarize,
     )
     flat_path = outdir / f"{label}_flattened.png"
     clean_path = outdir / f"{label}_scan.png"
@@ -79,6 +89,11 @@ def _handle_one(label: str, img, args, outdir: Path) -> dict:
         except OcrUnavailable as e:
             print(f"warning: {e}", file=sys.stderr)
 
+    if args.summarize and result.ocr_json.get("blocks"):
+        ocr_path = outdir / f"{label}_ocr.json"
+        ocr_path.write_text(json.dumps(result.ocr_json, indent=2, ensure_ascii=False))
+        outputs["ocr_json"] = str(ocr_path)
+
     return {
         "input": label,
         "category": result.category,
@@ -91,6 +106,7 @@ def _handle_one(label: str, img, args, outdir: Path) -> dict:
         "classifier": result.classification.get("method", "n/a"),
         "dewarp_method": result.dewarp_method,
         "denoise_method": result.denoise_method,
+        "understanding": result.understanding or None,
         "outputs": outputs,
     }
 
@@ -108,10 +124,18 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="Print results as JSON")
     parser.add_argument("--bw", action="store_true",
                         help="Pure black & white scan instead of clean grayscale")
+    parser.add_argument("--ocr-engine", choices=["tesseract", "surya"], default=None,
+                        help="OCR engine for classification keyword fusion "
+                             "(default: tesseract, or $DOC_OCR_ENGINE). 'surya' needs "
+                             "the optional surya-ocr extra; it falls back to Tesseract.")
     parser.add_argument("--searchable-pdf", action="store_true",
                         help="Also write a searchable PDF (OCR text layer; needs Tesseract)")
     parser.add_argument("--text", action="store_true",
                         help="Also write extracted OCR text (.txt; needs Tesseract)")
+    parser.add_argument("--summarize", action="store_true",
+                        help="Summarize the document and extract structured fields "
+                             "(receipt total, date, …). Uses Gemini when $GEMINI_API_KEY "
+                             "is set, otherwise an offline extractive fallback.")
     args = parser.parse_args()
 
     paths = [Path(p) for p in args.inputs]

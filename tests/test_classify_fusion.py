@@ -43,7 +43,7 @@ def test_ocr_scores_are_capped():
 
 def test_classify_falls_back_to_ocr_when_clip_unavailable(monkeypatch):
     monkeypatch.setattr(C, "_clip_label_logits", lambda img: None)
-    monkeypatch.setattr(C, "_ocr_text", lambda img: "total subtotal cash receipt change")
+    monkeypatch.setattr(C, "_ocr_text", lambda img, engine=None: "total subtotal cash receipt change")
     res = C.classify(np.zeros((8, 8, 3), np.uint8))
     assert res["method"] == "ocr"
     assert res["label"] == "Receipt"
@@ -56,7 +56,8 @@ def test_classify_fuses_ocr_into_clip(monkeypatch):
     base["Bill"] = 12.0
     base["Invoice"] = 11.0
     monkeypatch.setattr(C, "_clip_label_logits", lambda img: dict(base))
-    monkeypatch.setattr(C, "_ocr_text", lambda img: "invoice no 7 bill to acme amount due due date")
+    monkeypatch.setattr(C, "_ocr_text",
+                        lambda img, engine=None: "invoice no 7 bill to acme amount due due date")
     res = C.classify(np.zeros((8, 8, 3), np.uint8), use_ocr=True)
     assert res["method"] == "clip+ocr"
     assert res["label"] == "Invoice"
@@ -66,7 +67,32 @@ def test_classify_no_ocr_signal_stays_clip(monkeypatch):
     base = {lbl: 0.0 for lbl in C.DOCUMENT_TYPES}
     base["Receipt"] = 25.0
     monkeypatch.setattr(C, "_clip_label_logits", lambda img: dict(base))
-    monkeypatch.setattr(C, "_ocr_text", lambda img: "")  # no text -> no fusion
+    monkeypatch.setattr(C, "_ocr_text", lambda img, engine=None: "")  # no text -> no fusion
     res = C.classify(np.zeros((8, 8, 3), np.uint8), use_ocr=True)
     assert res["method"] == "clip"
     assert res["label"] == "Receipt"
+
+
+def test_ocr_text_surya_falls_back_to_tesseract(monkeypatch):
+    # Surya unavailable/empty -> _ocr_text should fall back to the tesseract path.
+    monkeypatch.setattr(C, "_surya_text", lambda img, lower=True: "")
+    monkeypatch.setattr(C, "_tesseract_text", lambda img, lower=True: "fallback text")
+    assert C._ocr_text(np.zeros((8, 8, 3), np.uint8), engine="surya") == "fallback text"
+
+
+def test_ocr_text_surya_used_when_it_returns_text(monkeypatch):
+    monkeypatch.setattr(C, "_surya_text", lambda img, lower=True: "surya text")
+    monkeypatch.setattr(C, "_tesseract_text", lambda img, lower=True: "should not be used")
+    assert C._ocr_text(np.zeros((8, 8, 3), np.uint8), engine="surya") == "surya text"
+
+
+def test_classify_method_tags_surya_engine(monkeypatch):
+    base = {lbl: 0.0 for lbl in C.DOCUMENT_TYPES}
+    base["Bill"] = 12.0
+    base["Invoice"] = 11.0
+    monkeypatch.setattr(C, "_clip_label_logits", lambda img: dict(base))
+    monkeypatch.setattr(C, "_ocr_text",
+                        lambda img, engine=None: "invoice no 7 amount due due date")
+    res = C.classify(np.zeros((8, 8, 3), np.uint8), use_ocr=True, ocr_engine="surya")
+    assert res["method"] == "clip+ocr:surya"
+    assert res["label"] == "Invoice"

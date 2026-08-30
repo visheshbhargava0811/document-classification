@@ -24,6 +24,9 @@ class ScanResult:
     dewarp_method: str
     denoise_method: str
     classification: dict = field(default_factory=dict)
+    raw_text: str = ""               # case-preserving OCR text (for extraction/summary)
+    ocr_json: dict = field(default_factory=dict)       # structured OCR: engine + blocks
+    understanding: dict = field(default_factory=dict)  # summary + key_points + fields
 
     @property
     def doc_type(self) -> str:
@@ -119,6 +122,8 @@ def process_image(
     classify_type: bool = True,
     device: str | None = None,
     binarize: bool = False,
+    ocr_engine: str | None = None,
+    understand: bool = False,
 ) -> ScanResult:
     weights_dir = Path(weights_dir) if weights_dir else DEFAULT_WEIGHTS_DIR
     device = device or _pick_device()
@@ -126,11 +131,28 @@ def process_image(
     dw = _dewarp.dewarp(image_bgr, base_dir=weights_dir, device=device)
     dn = _denoise.denoise(dw["flattened"], base_dir=weights_dir, device=device, binarize=binarize)
 
+    flat_rgb = cv2.cvtColor(dw["flattened"], cv2.COLOR_BGR2RGB)
+
     classification: dict = {}
     if classify_type:
         # Classify on the color, perspective-corrected page (CLIP likes photos).
-        flat_rgb = cv2.cvtColor(dw["flattened"], cv2.COLOR_BGR2RGB)
-        classification = _classify.classify(flat_rgb)
+        classification = _classify.classify(flat_rgb, ocr_engine=ocr_engine)
+
+    raw_text = ""
+    ocr_json: dict = {}
+    understanding: dict = {}
+    if understand:
+        # One OCR pass yields both the case-preserving text (for summarisation) and
+        # the structured per-region JSON (engine + blocks with bboxes/confidence).
+        ocr = _classify.ocr_extract(flat_rgb, engine=ocr_engine)
+        raw_text = ocr.get("text", "")
+        ocr_json = {"engine": ocr.get("engine", ""), "blocks": ocr.get("blocks", [])}
+        if raw_text.strip():
+            from . import understand as _understand
+
+            understanding = _understand.understand(
+                raw_text, doc_type=classification.get("label")
+            )
 
     return ScanResult(
         original=image_bgr,
@@ -140,6 +162,9 @@ def process_image(
         dewarp_method=dw["method"],
         denoise_method=dn["method"],
         classification=classification,
+        raw_text=raw_text,
+        ocr_json=ocr_json,
+        understanding=understanding,
     )
 
 

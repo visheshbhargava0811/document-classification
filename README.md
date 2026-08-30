@@ -25,8 +25,12 @@ denoising) and adds a document-type classifier plus a real, runnable app — a
   (Invoice vs Bill vs Purchase Order, Cheque, Payslip, Menu…).
 - **Inputs** — images *and* multi-page PDFs, single or **batch**, plus **camera
   capture** in the web app.
+- **Summarize & extract** — read the document and produce a plain-language
+  **summary** plus **structured fields** (receipt total, date, merchant, invoice
+  number…). Uses **Google Gemini** when `GEMINI_API_KEY` is set, and falls back to
+  a fully **offline** extractor (regex + extractive summary) otherwise.
 - **Exports** — cleaned PNG, **searchable PDF** (invisible OCR text layer),
-  extracted text, JSON, and a batch **ZIP**.
+  extracted text, JSON (now including the summary + fields), and a batch **ZIP**.
 - **No training required** — CLIP zero-shot + classic-CV fallbacks; optional
   trained weights load as a drop-in upgrade.
 
@@ -66,12 +70,18 @@ _(replace with your URL after connecting the repo — see [Deploy](#-deploy))._
 Requires Python 3.11–3.13 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync                # core app
-uv sync --extra ocr    # + Tesseract OCR (searchable-PDF/text export & fusion)
+uv sync                     # core app
+uv sync --extra ocr         # + Tesseract OCR (searchable-PDF/text export & fusion)
+uv sync --extra understand  # + Google Gemini summaries & extraction
 ```
 
 The OCR features need the `tesseract` binary: `brew install tesseract` (macOS) or
 `apt-get install tesseract-ocr` (Debian/Ubuntu).
+
+For Gemini-powered summaries, copy `.env.example` to `.env` and set
+`GEMINI_API_KEY` ([get one here](https://aistudio.google.com/apikey)). Without a
+key the summarize/extract feature still runs fully offline. Override the model
+with `DOC_GEMINI_MODEL` (default `gemini-3.6-flash`). `.env` is gitignored.
 
 ## 🖥️ Usage
 
@@ -91,6 +101,7 @@ buttons (PNG / searchable PDF / text / JSON, plus a ZIP for batches).
 uv run docscan photo.jpg                       # single image
 uv run docscan scans/ report.pdf --json        # a folder + a PDF, JSON output
 uv run docscan photo.jpg --searchable-pdf --text
+uv run docscan receipt.jpg --summarize         # summary + extracted fields (total, date…)
 uv run docscan photo.jpg --bw                  # hard black & white scan
 ```
 
@@ -166,6 +177,8 @@ src/document_classification/
   dewarp.py     # stage 1: corner detection (CNN / OpenCV) + perspective warp
   denoise.py    # stage 2: U-Net / classic enhancement (illumination division)
   classify.py   # stage 3: CLIP zero-shot + OCR fusion + hierarchical inference
+  extract.py    # deterministic offline field extraction (totals, dates, invoice #)
+  understand.py # stage 4: Gemini summary + structured extraction (offline fallback)
   exports.py    # OCR text + searchable-PDF export
   pipeline.py   # orchestration -> ScanResult; image/PDF loading
   cli.py        # `docscan` command

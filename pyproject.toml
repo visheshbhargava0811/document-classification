@@ -21,6 +21,12 @@ dependencies = [
 
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]
+# Optional high-accuracy OCR engine for the classification path (opt-in; heavy).
+# Pin a version — Surya's predictor API changes between releases.
+surya = ["surya-ocr>=0.6"]
+# Summary + structured extraction via Google Gemini (opt-in; needs GEMINI_API_KEY).
+# Without it, the understand layer still runs fully offline via extract.py.
+understand = ["google-genai>=0.3"]
 
 [dependency-groups]
 dev = [

@@ -4,3 +4,7 @@ base = "light"
 
 [server]
 maxUploadSize = 50
+# The local-source file watcher walks torch.classes.__path__ on every rerun and
+# throws, which kills the server process (ERR_CONNECTION_REFUSED / white screen)
+# when a widget triggers reprocessing. We don't need hot-reload in production.
+fileWatcherType = "none"
