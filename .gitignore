@@ -20,3 +20,6 @@ dist/
 
 # eval run artifacts (keep the script + curated inputs, not outputs)
 eval/results/
+
+# scratch/debug logs
+scratch_*.log
