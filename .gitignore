@@ -27,3 +27,7 @@ scratch_port.txt
 
 # exported annotation crops (regenerate via training/export_line_crops.py)
 training/crops/
+
+# runtime review-capture artifacts (user-specific accumulated data)
+data/item_graph_learned.json
+data/review_labels.csv

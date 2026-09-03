@@ -29,6 +29,9 @@ from functools import lru_cache
 from pathlib import Path
 
 _DEFAULT_GRAPH = Path(__file__).resolve().parents[2] / "data" / "item_graph.json"
+# Aliases/items learned from human review corrections (see capture.py). Kept
+# separate from the curated seed so provenance stays clear; merged in at load.
+_LEARNED_GRAPH = Path(__file__).resolve().parents[2] / "data" / "item_graph_learned.json"
 
 MATCH_THRESHOLD = 0.72   # below this we keep the model's own English
 HIGH_CONF = 0.88         # a match this strong is high-confidence (if OCR was legible)
@@ -82,7 +85,34 @@ def load_graph(path: str | None = None) -> Graph:
             key = _norm(s)
             if key:
                 index.setdefault(key, iid)  # first wins on collision
+
+    # Merge aliases/items learned from human review (capture.py), if any.
+    _merge_learned(items, index)
     return Graph(items, categories, index, list(raw.get("edges") or []))
+
+
+def _merge_learned(items: dict, index: dict) -> None:
+    if not _LEARNED_GRAPH.is_file():
+        return
+    try:
+        learned = json.loads(_LEARNED_GRAPH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    for ni in learned.get("new_items") or []:
+        iid = ni.get("id")
+        if not iid:
+            continue
+        items.setdefault(iid, {"name": ni.get("name", ""), "erp": ni.get("erp", ""),
+                               "category": ni.get("category", ""), "aliases": ni.get("aliases", [])})
+        for s in [items[iid].get("name", ""), *(items[iid].get("aliases") or [])]:
+            key = _norm(s)
+            if key:
+                index.setdefault(key, iid)
+    for a in learned.get("aliases") or []:
+        key = a.get("raw_norm") or _norm(a.get("raw", ""))
+        eid = a.get("entity_id")
+        if key and eid and eid in items:
+            index.setdefault(key, eid)
 
 
 def _score(query: str, candidate: str) -> float:

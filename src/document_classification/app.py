@@ -298,7 +298,7 @@ def _render_detail(label: str, res: dict, nested: bool = False) -> None:
 
     _render_page_breakdown(res, nested)
     _render_understanding(res, nested)
-    _render_invoice(res)
+    _render_invoice(label, res)
     _render_downloads(label, res)
 
 
@@ -339,7 +339,92 @@ def _fmt_field(key: str, value) -> str:
     return f"**{label}:** {value}"
 
 
-def _render_invoice(res: dict) -> None:
+def _render_review(label: str, inv: dict, particulars: list) -> None:
+    """Editable review of the line items. Saving teaches the knowledge graph
+    (raw OCR text → item) and logs the correction as ground truth — so the
+    unavoidable human review of handwritten rows becomes a data-collection loop."""
+    import pandas as pd
+
+    from document_classification.capture import learn_from_corrections, log_labels
+    from document_classification.item_graph import normalize_particulars
+    from document_classification.validate import validate_invoice
+
+    st.markdown("#### ✍️ Review & correct")
+    st.caption("Fix the English item name, quantity or amount on any row — especially "
+               "**low**-confidence ones. Saving teaches the knowledge graph (raw text → "
+               "item) so the same handwriting auto-resolves next time, and logs each row "
+               "as training/ground-truth data. Region image-crops for training come from "
+               "`training/export_line_crops.py`.")
+    stem = _safe_stem(label)
+
+    if not particulars:
+        st.info("No line items were extracted to review.")
+        return
+
+    df = pd.DataFrame([{
+        "Item (raw)": p.get("item_raw", ""),
+        "Item (English)": p.get("item", ""),
+        "Qty": int(p.get("qty", 1) or 1),
+        "Amount": p.get("amount", ""),
+        "Confidence": p.get("confidence", ""),
+    } for p in particulars])
+
+    edited = st.data_editor(
+        df, key=f"rev_{stem}", num_rows="dynamic", use_container_width=True, hide_index=True,
+        column_config={
+            "Item (raw)": st.column_config.TextColumn("Item (raw)", disabled=True,
+                                                      help="Original OCR text (read-only)"),
+            "Item (English)": st.column_config.TextColumn("Item (English)"),
+            "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1),
+            "Amount": st.column_config.TextColumn("Amount"),
+            "Confidence": st.column_config.TextColumn("Confidence", disabled=True),
+        },
+    )
+
+    def _rows_to_particulars(frame) -> list[dict]:
+        out = []
+        for _, r in frame.iterrows():
+            name = str(r.get("Item (English)") or "").strip()
+            amount = str(r.get("Amount") or "").strip()
+            if not name and not amount:
+                continue
+            out.append({"item_raw": str(r.get("Item (raw)") or "").strip(),
+                        "item": name or "(illegible)",
+                        "qty": _coerce_qty(r.get("Qty")), "amount": amount,
+                        "erp_code": "", "category": "",
+                        "confidence": str(r.get("Confidence") or "")})
+        return out
+
+    c1, c2 = st.columns([1, 1])
+    if c1.button("💾 Save corrections & teach the graph", key=f"save_{stem}", type="primary"):
+        corrected = _rows_to_particulars(edited)
+        n_alias, n_new = learn_from_corrections(particulars, corrected)
+        corrected = normalize_particulars(corrected)  # re-resolve with the new aliases
+        corrected_inv = {**inv, "particulars": corrected}
+        corrected_inv["validation"] = validate_invoice(corrected_inv)
+        n_rows = log_labels(label, corrected_inv)
+        st.session_state[f"corr_{stem}"] = corrected_inv
+        st.success(f"Saved. Taught the graph {n_alias} alias(es) + {n_new} new item(s); "
+                   f"logged {n_rows} labelled row(s). The graph will use these next time.")
+
+    corrected_inv = st.session_state.get(f"corr_{stem}", inv)
+    c2.download_button(
+        "⬇️ Corrected invoice (Excel)", invoice_workbook([(label, corrected_inv)]),
+        file_name=f"{stem}_corrected.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"dlcorr_{stem}",
+    )
+
+
+def _coerce_qty(value, default: int = 1) -> int:
+    try:
+        n = int(float(value))
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _render_invoice(label: str, res: dict) -> None:
     """Show the extracted invoice header fields + line-items table, when computed."""
     inv = res.get("invoice") or {}
     if not inv:
@@ -376,18 +461,7 @@ def _render_invoice(res: dict) -> None:
         st.warning(f"⚠️ GSTIN checksum invalid ({g.get('reason')}) — likely an OCR error; verify it.")
 
     particulars = inv.get("particulars") or []
-    if particulars:
-        st.dataframe(
-            [{"Item (raw)": p.get("item_raw", ""), "Item (English)": p.get("item", ""),
-              "ERP Code": p.get("erp_code", ""), "Category": p.get("category", ""),
-              "Qty": p.get("qty", 1), "Amount": p.get("amount", ""),
-              "Confidence": p.get("confidence", "")} for p in particulars],
-            use_container_width=True, hide_index=True,
-        )
-    st.caption("Extracted by Gemini from Surya OCR regions, then resolved against the "
-               "item knowledge graph (canonical name + ERP code + category); source kept "
-               "as \"raw\". Use the **Download invoices (Excel)** button above (flat, one "
-               "row per line item). Low-confidence rows need review — verify amounts.")
+    _render_review(label, inv, particulars)
 
 
 def _render_understanding(res: dict, nested: bool = False) -> None:
