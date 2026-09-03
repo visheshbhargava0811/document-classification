@@ -592,3 +592,107 @@ def classify(image_rgb: np.ndarray, top_k: int = 5, prefer: str = "clip",
                     method = f"clip+ocr:{engine}" if engine == "surya" else "clip+ocr"
             return _finalize(label_logits, method=method, top_k=top_k)
     return classify_ocr(image_rgb, top_k=top_k, ocr_engine=ocr_engine)
+
+
+def _fused_page_logits(
+    image_rgb: np.ndarray, use_ocr: bool, ocr_engine: str | None
+) -> tuple[dict[str, float] | None, dict[str, int]]:
+    """Per-leaf CLIP logits for one page with OCR keyword hits fused in.
+
+    Returns ``(label_logits, ocr_hits)``. ``label_logits`` is None when CLIP is
+    unavailable (the document-level caller then falls back to pure OCR). This is
+    the same fusion the single-image :func:`classify` applies, factored out so a
+    whole document can be aggregated from its pages' logits.
+    """
+    label_logits = _clip_label_logits(image_rgb)
+    ocr_hits: dict[str, int] = {}
+    if use_ocr:
+        ocr_hits = _ocr_label_scores(_ocr_text(image_rgb, engine=ocr_engine))
+    if label_logits is not None and ocr_hits:
+        for lbl, hits in ocr_hits.items():
+            label_logits[lbl] = label_logits.get(lbl, 0.0) + OCR_BOOST * hits
+    return label_logits, ocr_hits
+
+
+def classify_document(
+    images: list[np.ndarray], top_k: int = 5, use_ocr: bool = True,
+    ocr_engine: str | None = None,
+) -> dict:
+    """Classify a multi-page document (a list of page images) as ONE result.
+
+    A single PDF is one document with one type, so instead of classifying each
+    page independently we **average the per-page CLIP logits** across the whole
+    document and decide the category/type once via :func:`_finalize`. OCR keyword
+    hits are summed across pages then re-capped at ``OCR_MAX_HITS`` so fusion
+    stays a nudge (the same magnitude as the single-page path). The result has
+    the same shape as :func:`classify`, plus a ``"pages"`` per-page breakdown for
+    transparency. Falls back to an aggregated OCR heuristic when CLIP is
+    unavailable.
+    """
+    if not images:
+        return classify_ocr(np.zeros((1, 1, 3), dtype=np.uint8), top_k=top_k)
+
+    labels = list(DOCUMENT_TYPES.keys())
+    sum_logits: dict[str, float] = {lbl: 0.0 for lbl in labels}
+    sum_hits: dict[str, int] = {}
+    n_clip = 0
+    pages: list[dict] = []
+
+    for i, img in enumerate(images, 1):
+        page_logits, ocr_hits = _fused_page_logits(img, use_ocr, ocr_engine)
+        for lbl, hits in ocr_hits.items():
+            sum_hits[lbl] = sum_hits.get(lbl, 0) + hits
+        if page_logits is not None:
+            n_clip += 1
+            for lbl in labels:
+                sum_logits[lbl] += page_logits.get(lbl, -1e9)
+            page_res = _finalize(page_logits, method="clip", top_k=1)
+            pages.append({
+                "page": i,
+                "label": page_res["label"],
+                "category": page_res["category"],
+                "confidence": round(page_res["confidence"], 4),
+                "uncertain": page_res["uncertain"],
+            })
+
+    engine = (ocr_engine or DEFAULT_OCR_ENGINE).lower()
+
+    # No page produced CLIP logits -> aggregate OCR keyword scores over the doc.
+    if n_clip == 0:
+        capped = {lbl: min(hits, OCR_MAX_HITS) for lbl, hits in sum_hits.items() if hits}
+        if not capped:
+            return {
+                "method": "ocr-doc", "label": "unknown (no text detected)",
+                "category": "", "confidence": 0.0, "category_confidence": 0.0,
+                "uncertain": True, "top_k": [], "pages": pages,
+            }
+        total = sum(capped.values())
+        ranked = sorted(capped.items(), key=lambda kv: kv[1], reverse=True)
+        top_label = ranked[0][0]
+        return {
+            "method": "ocr-doc", "label": top_label,
+            "category": CATEGORY_OF.get(top_label, ""),
+            "confidence": ranked[0][1] / total,
+            "category_confidence": ranked[0][1] / total,
+            "uncertain": ranked[0][1] < 2,
+            "top_k": [
+                {"label": k, "category": CATEGORY_OF.get(k, ""), "score": v / total}
+                for k, v in ranked[:top_k]
+            ],
+            "pages": pages,
+        }
+
+    # Average the per-leaf logits across the CLIP-scored pages, then re-fuse the
+    # document-wide OCR hits (summed, re-capped) so their weight matches a page.
+    avg_logits = {lbl: sum_logits[lbl] / n_clip for lbl in labels}
+    method = "clip-doc"
+    if use_ocr and sum_hits:
+        for lbl, hits in sum_hits.items():
+            capped = min(hits, OCR_MAX_HITS)
+            if capped:
+                avg_logits[lbl] = avg_logits.get(lbl, 0.0) + OCR_BOOST * capped
+        method = f"clip+ocr:{engine}-doc" if engine == "surya" else "clip+ocr-doc"
+
+    result = _finalize(avg_logits, method=method, top_k=top_k)
+    result["pages"] = pages
+    return result

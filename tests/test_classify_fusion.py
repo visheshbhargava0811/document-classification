@@ -96,3 +96,64 @@ def test_classify_method_tags_surya_engine(monkeypatch):
     res = C.classify(np.zeros((8, 8, 3), np.uint8), use_ocr=True, ocr_engine="surya")
     assert res["method"] == "clip+ocr:surya"
     assert res["label"] == "Invoice"
+
+
+# --------------------------------------------------------------------------- #
+# Document-level classification (a PDF is one document with one type)
+# --------------------------------------------------------------------------- #
+def _page_logits(label: str, value: float = 30.0):
+    logits = {lbl: 0.0 for lbl in C.DOCUMENT_TYPES}
+    logits[label] = value
+    return logits
+
+
+def test_classify_document_averages_to_dominant_category(monkeypatch):
+    # 3 Exam pages + 1 Cheque page: the document should be Education overall,
+    # not flip to the single minority page's type.
+    per_page = [_page_logits("Exam"), _page_logits("Exam"),
+                _page_logits("Exam"), _page_logits("Cheque")]
+    it = iter(per_page)
+    monkeypatch.setattr(C, "_clip_label_logits", lambda img: next(it))
+    monkeypatch.setattr(C, "_ocr_text", lambda img, engine=None: "")
+    imgs = [np.zeros((8, 8, 3), np.uint8) for _ in per_page]
+    res = C.classify_document(imgs)
+    assert res["category"] == "Education"
+    assert res["label"] == "Exam"
+    assert res["method"] == "clip-doc"
+    # Per-page breakdown is preserved for transparency.
+    assert [p["page"] for p in res["pages"]] == [1, 2, 3, 4]
+    assert res["pages"][3]["category"] == "Financial"  # the minority page
+
+
+def test_classify_document_minority_page_does_not_flip(monkeypatch):
+    # One strong Receipt page cannot outweigh four Contract pages once averaged.
+    per_page = [_page_logits("Receipt", 60.0)] + [_page_logits("Contract", 30.0)] * 4
+    it = iter(per_page)
+    monkeypatch.setattr(C, "_clip_label_logits", lambda img: next(it))
+    monkeypatch.setattr(C, "_ocr_text", lambda img, engine=None: "")
+    imgs = [np.zeros((8, 8, 3), np.uint8) for _ in per_page]
+    res = C.classify_document(imgs)
+    assert res["category"] == "Business"
+    assert res["label"] == "Contract"
+
+
+def test_classify_document_ocr_fusion_tags_surya(monkeypatch):
+    per_page = [_page_logits("Exam"), _page_logits("Exam")]
+    it = iter(per_page)
+    monkeypatch.setattr(C, "_clip_label_logits", lambda img: next(it))
+    monkeypatch.setattr(C, "_ocr_text",
+                        lambda img, engine=None: "transcript gpa grade semester credits")
+    imgs = [np.zeros((8, 8, 3), np.uint8) for _ in per_page]
+    res = C.classify_document(imgs, ocr_engine="surya")
+    assert res["method"] == "clip+ocr:surya-doc"
+
+
+def test_classify_document_falls_back_to_ocr_without_clip(monkeypatch):
+    monkeypatch.setattr(C, "_clip_label_logits", lambda img: None)
+    monkeypatch.setattr(C, "_ocr_text",
+                        lambda img, engine=None: "total subtotal cash receipt change")
+    imgs = [np.zeros((8, 8, 3), np.uint8) for _ in range(3)]
+    res = C.classify_document(imgs)
+    assert res["method"] == "ocr-doc"
+    assert res["category"] == "Financial"
+    assert res["label"] == "Receipt"

@@ -5,11 +5,14 @@ import cv2
 import numpy as np
 import pytest
 
+from document_classification import classify as C
 from document_classification.pipeline import (
+    DocumentResult,
     ImageDecodeError,
     ScanResult,
     decode_image_bytes,
     pdf_to_images,
+    process_document,
     process_image,
 )
 
@@ -64,3 +67,29 @@ def test_pdf_to_images_renders_pages():
 def test_pdf_to_images_rejects_non_pdf():
     with pytest.raises(ImageDecodeError):
         pdf_to_images(b"not a pdf")
+
+
+def test_process_document_yields_one_classification(monkeypatch):
+    # Two pages -> a single document-level classification + a per-page breakdown.
+    def _logits(label):
+        d = {lbl: 0.0 for lbl in C.DOCUMENT_TYPES}
+        d[label] = 30.0
+        return d
+
+    per_page = iter([_logits("Exam"), _logits("Exam")])
+    monkeypatch.setattr(C, "_clip_label_logits", lambda img: next(per_page))
+    monkeypatch.setattr(C, "_ocr_text", lambda img, engine=None: "")
+
+    imgs = [_synthetic_document(), _synthetic_document()]
+    doc = process_document(imgs)
+    assert isinstance(doc, DocumentResult)
+    assert len(doc.pages) == 2
+    assert all(isinstance(p, ScanResult) for p in doc.pages)
+    assert doc.category == "Education"
+    assert doc.doc_type == "Exam"
+    assert len(doc.classification["pages"]) == 2
+
+
+def test_process_document_rejects_empty():
+    with pytest.raises(ImageDecodeError):
+        process_document([])

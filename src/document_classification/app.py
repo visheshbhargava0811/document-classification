@@ -14,16 +14,19 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from contextlib import contextmanager
 
 import cv2
 import numpy as np
 import streamlit as st
 
 from document_classification.exports import OcrUnavailable, extract_text, searchable_pdf
+from document_classification.invoice import invoice_workbook
 from document_classification.pipeline import (
     ImageDecodeError,
     decode_image_bytes,
     pdf_to_images,
+    process_document,
     process_image,
 )
 
@@ -66,10 +69,12 @@ def _gemini_available() -> bool:
 
 @st.cache_data(show_spinner=False)
 def _process_page(png_bytes: bytes, binarize: bool, want_exports: bool,
-                  ocr_engine: str, want_understanding: bool) -> dict:
+                  ocr_engine: str, want_understanding: bool,
+                  want_translate: bool = False, want_invoice: bool = False) -> dict:
     bgr = decode_image_bytes(png_bytes)
     result = process_image(bgr, binarize=binarize, ocr_engine=ocr_engine,
-                           understand=want_understanding)
+                           understand=want_understanding, translate=want_translate,
+                           invoice=want_invoice)
     out = {
         "flattened": cv2.cvtColor(result.flattened, cv2.COLOR_BGR2RGB),
         "cleaned": result.cleaned,
@@ -80,7 +85,9 @@ def _process_page(png_bytes: bytes, binarize: bool, want_exports: bool,
         "original": cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB),
         "raw_text": result.raw_text,
         "ocr_json": result.ocr_json,
+        "ocr_json_en": result.ocr_json_en,
         "understanding": result.understanding,
+        "invoice": result.invoice,
         "text": None,
         "pdf": None,
     }
@@ -93,14 +100,77 @@ def _process_page(png_bytes: bytes, binarize: bool, want_exports: bool,
     return out
 
 
+@st.cache_data(show_spinner=False)
+def _process_document(kind: str, pages_bytes: tuple[bytes, ...], binarize: bool,
+                      want_exports: bool, ocr_engine: str,
+                      want_understanding: bool, want_translate: bool = False,
+                      want_invoice: bool = False) -> dict:
+    """Process one document. Images defer to :func:`_process_page`; a multi-page
+    PDF is dewarped/denoised per page but classified as ONE document.
+
+    Returns the same ``res`` shape as :func:`_process_page` (so the existing
+    detail renderer works), using page 1 as the representative stage view and
+    adding ``doc_pages`` thumbnails plus the per-page breakdown in
+    ``classification["pages"]``.
+    """
+    if kind != "pdf" or len(pages_bytes) == 1:
+        return _process_page(pages_bytes[0], binarize, want_exports, ocr_engine,
+                             want_understanding, want_translate, want_invoice)
+
+    images = [decode_image_bytes(b) for b in pages_bytes]
+    doc = process_document(images, binarize=binarize, ocr_engine=ocr_engine,
+                           understand=want_understanding, translate=want_translate,
+                           invoice=want_invoice)
+    first = doc.pages[0]
+    # Flatten the per-page OCR JSON into one {engine, blocks} for the UI/exports.
+    all_blocks: list[dict] = []
+    engine = doc.ocr_json.get("engine", "")
+    for pj in doc.ocr_json.get("pages", []):
+        all_blocks.extend(pj.get("blocks", []))
+    all_blocks_en: list[dict] = []
+    engine_en = doc.ocr_json_en.get("engine", "")
+    for pj in doc.ocr_json_en.get("pages", []):
+        all_blocks_en.extend(pj.get("blocks", []))
+    out = {
+        "flattened": cv2.cvtColor(first.flattened, cv2.COLOR_BGR2RGB),
+        "cleaned": first.cleaned,
+        "corners": first.corners.tolist(),
+        "dewarp_method": first.dewarp_method,
+        "denoise_method": first.denoise_method,
+        "classification": doc.classification,
+        "original": cv2.cvtColor(first.original, cv2.COLOR_BGR2RGB),
+        "raw_text": doc.raw_text,
+        "ocr_json": {"engine": engine, "blocks": all_blocks} if all_blocks else {},
+        "ocr_json_en": ({"engine": engine_en, "target_language": "en",
+                         "blocks": all_blocks_en} if all_blocks_en else {}),
+        "understanding": doc.understanding,
+        "invoice": doc.invoice,
+        "text": None,
+        "pdf": None,
+        "n_pages": len(doc.pages),
+        "doc_pages": [p.cleaned for p in doc.pages],
+    }
+    if want_exports:
+        try:
+            out["text"] = "\n\n".join(extract_text(p.cleaned) for p in doc.pages)
+        except OcrUnavailable:
+            pass
+    return out
+
+
 def _png_bytes(bgr: np.ndarray) -> bytes:
     ok, buf = cv2.imencode(".png", bgr)
     return buf.tobytes()
 
 
-def _gather_pages(uploaded, camera) -> list[tuple[str, bytes]]:
-    """Flatten uploads (+ camera) into (label, png/image-bytes) pages, expanding PDFs."""
-    pages: list[tuple[str, bytes]] = []
+def _gather_documents(uploaded, camera) -> list[tuple[str, str, tuple[bytes, ...]]]:
+    """Group uploads (+ camera) into documents: (label, kind, page-bytes tuple).
+
+    A PDF is one document made of its page images (classified as a whole); each
+    image/camera shot is its own single-page document. ``kind`` is "pdf" or
+    "image".
+    """
+    documents: list[tuple[str, str, tuple[bytes, ...]]] = []
     files = list(uploaded or [])
     if camera is not None:
         files.append(camera)
@@ -109,16 +179,34 @@ def _gather_pages(uploaded, camera) -> list[tuple[str, bytes]]:
         data = f.getvalue()
         if name.lower().endswith(".pdf"):
             imgs = pdf_to_images(data)
-            for i, img in enumerate(imgs, 1):
-                pages.append((f"{name} · page {i}", _png_bytes(img)))
+            documents.append((name, "pdf", tuple(_png_bytes(img) for img in imgs)))
         else:
-            pages.append((name, data))
-    return pages
+            documents.append((name, "image", (data,)))
+    return documents
 
 
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
+@contextmanager
+def _collapsible(title: str, nested: bool):
+    """A collapsible section that degrades to a bordered container when nested.
+
+    Streamlit forbids an ``st.expander`` inside another expander. In the batch
+    view each document's detail is rendered inside a per-document expander, so
+    inner sections (per-page breakdown, OCR regions) must not open their own
+    expander there — they render as an always-open bordered block instead.
+    """
+    if nested:
+        box = st.container(border=True)
+        box.markdown(f"**{title}**")
+        with box:
+            yield
+    else:
+        with st.expander(title):
+            yield
+
+
 def _draw_corners(img_rgb: np.ndarray, corners) -> np.ndarray:
     out = img_rgb.copy()
     pts = np.array(corners, dtype=np.int32)
@@ -156,10 +244,13 @@ def _result_payload(label: str, res: dict) -> dict:
             "key_points": understanding.get("key_points", []),
             "fields": understanding.get("fields", {}),
         }
+    ocr_json_en = res.get("ocr_json_en") or {}
+    if ocr_json_en.get("blocks"):
+        payload["ocr_json_en"] = ocr_json_en
     return payload
 
 
-def _render_detail(label: str, res: dict) -> None:
+def _render_detail(label: str, res: dict, nested: bool = False) -> None:
     cls = res["classification"]
     category = cls.get("category", "")
     lbl = cls.get("label", "unknown")
@@ -167,6 +258,11 @@ def _render_detail(label: str, res: dict) -> None:
     cat_conf = cls.get("category_confidence", 0.0)
     uncertain = cls.get("uncertain", False)
     method = cls.get("method", "n/a")
+
+    n_pages = res.get("n_pages")
+    if n_pages:
+        st.caption(f"📄 {n_pages}-page document — classified as a whole "
+                   f"(page 1 shown below as representative).")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Category", category or "—", help=f"{cat_conf*100:.1f}% confident")
@@ -200,8 +296,40 @@ def _render_detail(label: str, res: dict) -> None:
         st.image(res["cleaned"], use_container_width=True, clamp=True)
         st.caption(f"Enhancement: {res['denoise_method']}")
 
-    _render_understanding(res)
+    _render_page_breakdown(res, nested)
+    _render_understanding(res, nested)
+    _render_invoice(label, res)
     _render_downloads(label, res)
+
+
+def _render_page_breakdown(res: dict, nested: bool = False) -> None:
+    """For a multi-page document, show each page's own guess + scan thumbnail."""
+    pages = res.get("classification", {}).get("pages") or []
+    thumbs = res.get("doc_pages") or []
+    if len(pages) <= 1 and len(thumbs) <= 1:
+        return
+    with _collapsible(f"📄 Per-page breakdown ({res.get('n_pages', len(thumbs))} pages)", nested):
+        st.caption("Each page's independent guess — the headline type above is the "
+                   "whole-document decision (averaged across all pages).")
+        if pages:
+            st.dataframe(
+                [
+                    {
+                        "Page": p["page"],
+                        "Category": p.get("category", ""),
+                        "Type": p["label"] if not p.get("uncertain") else "(uncertain)",
+                        "Confidence": f"{p.get('confidence', 0.0)*100:.0f}%",
+                    }
+                    for p in pages
+                ],
+                use_container_width=True, hide_index=True,
+            )
+        if thumbs:
+            cols = st.columns(min(4, len(thumbs)))
+            for i, thumb in enumerate(thumbs):
+                with cols[i % len(cols)]:
+                    st.image(thumb, caption=f"Page {i + 1}", use_container_width=True,
+                             clamp=True)
 
 
 def _fmt_field(key: str, value) -> str:
@@ -211,7 +339,132 @@ def _fmt_field(key: str, value) -> str:
     return f"**{label}:** {value}"
 
 
-def _render_understanding(res: dict) -> None:
+def _render_review(label: str, inv: dict, particulars: list) -> None:
+    """Editable review of the line items. Saving teaches the knowledge graph
+    (raw OCR text → item) and logs the correction as ground truth — so the
+    unavoidable human review of handwritten rows becomes a data-collection loop."""
+    import pandas as pd
+
+    from document_classification.capture import learn_from_corrections, log_labels
+    from document_classification.item_graph import normalize_particulars
+    from document_classification.validate import validate_invoice
+
+    st.markdown("#### ✍️ Review & correct")
+    st.caption("Fix the English item name, quantity or amount on any row — especially "
+               "**low**-confidence ones. Saving teaches the knowledge graph (raw text → "
+               "item) so the same handwriting auto-resolves next time, and logs each row "
+               "as training/ground-truth data. Region image-crops for training come from "
+               "`training/export_line_crops.py`.")
+    stem = _safe_stem(label)
+
+    if not particulars:
+        st.info("No line items were extracted to review.")
+        return
+
+    df = pd.DataFrame([{
+        "Item (raw)": p.get("item_raw", ""),
+        "Item (English)": p.get("item", ""),
+        "Qty": int(p.get("qty", 1) or 1),
+        "Amount": p.get("amount", ""),
+        "Confidence": p.get("confidence", ""),
+    } for p in particulars])
+
+    edited = st.data_editor(
+        df, key=f"rev_{stem}", num_rows="dynamic", use_container_width=True, hide_index=True,
+        column_config={
+            "Item (raw)": st.column_config.TextColumn("Item (raw)", disabled=True,
+                                                      help="Original OCR text (read-only)"),
+            "Item (English)": st.column_config.TextColumn("Item (English)"),
+            "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1),
+            "Amount": st.column_config.TextColumn("Amount"),
+            "Confidence": st.column_config.TextColumn("Confidence", disabled=True),
+        },
+    )
+
+    def _rows_to_particulars(frame) -> list[dict]:
+        out = []
+        for _, r in frame.iterrows():
+            name = str(r.get("Item (English)") or "").strip()
+            amount = str(r.get("Amount") or "").strip()
+            if not name and not amount:
+                continue
+            out.append({"item_raw": str(r.get("Item (raw)") or "").strip(),
+                        "item": name or "(illegible)",
+                        "qty": _coerce_qty(r.get("Qty")), "amount": amount,
+                        "erp_code": "", "category": "",
+                        "confidence": str(r.get("Confidence") or "")})
+        return out
+
+    c1, c2 = st.columns([1, 1])
+    if c1.button("💾 Save corrections & teach the graph", key=f"save_{stem}", type="primary"):
+        corrected = _rows_to_particulars(edited)
+        n_alias, n_new = learn_from_corrections(particulars, corrected)
+        corrected = normalize_particulars(corrected)  # re-resolve with the new aliases
+        corrected_inv = {**inv, "particulars": corrected}
+        corrected_inv["validation"] = validate_invoice(corrected_inv)
+        n_rows = log_labels(label, corrected_inv)
+        st.session_state[f"corr_{stem}"] = corrected_inv
+        st.success(f"Saved. Taught the graph {n_alias} alias(es) + {n_new} new item(s); "
+                   f"logged {n_rows} labelled row(s). The graph will use these next time.")
+
+    corrected_inv = st.session_state.get(f"corr_{stem}", inv)
+    c2.download_button(
+        "⬇️ Corrected invoice (Excel)", invoice_workbook([(label, corrected_inv)]),
+        file_name=f"{stem}_corrected.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"dlcorr_{stem}",
+    )
+
+
+def _coerce_qty(value, default: int = 1) -> int:
+    try:
+        n = int(float(value))
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _render_invoice(label: str, res: dict) -> None:
+    """Show the extracted invoice header fields + line-items table, when computed."""
+    inv = res.get("invoice") or {}
+    if not inv:
+        return
+    st.markdown("### 🧾 Invoice data")
+    currency = inv.get("currency") or ""
+    total = inv.get("total_amount") or ""
+    if total and currency:
+        total = f"{currency} {total}".strip()
+    header = [
+        ("Invoice No", inv.get("invoice_no")),
+        ("Date", inv.get("date")),
+        ("Vendor", inv.get("vendor_name")),
+        ("Customer", inv.get("customer_name")),
+        ("GSTIN", inv.get("gstin")),
+        ("Total", total),
+    ]
+    cols = st.columns(2)
+    for i, (k, v) in enumerate(h for h in header if h[1]):
+        cols[i % 2].markdown(f"**{k}:** {v}")
+
+    # Cheap validations: do the lines add up, and is the GSTIN checksum valid?
+    validation = inv.get("validation") or {}
+    rec = validation.get("reconciliation") or {}
+    if rec.get("status") == "ok":
+        st.success(f"✅ Line amounts reconcile with the total ({rec.get('lines_sum')}).")
+    elif rec.get("status") == "mismatch":
+        st.warning(f"⚠️ Line amounts sum to {rec.get('lines_sum')} but the total says "
+                   f"{rec.get('total')} (Δ {rec.get('diff')}). A line may be misread or missing.")
+    g = validation.get("gstin") or {}
+    if g.get("status") == "valid":
+        st.success("✅ GSTIN checksum valid.")
+    elif g.get("status") == "invalid":
+        st.warning(f"⚠️ GSTIN checksum invalid ({g.get('reason')}) — likely an OCR error; verify it.")
+
+    particulars = inv.get("particulars") or []
+    _render_review(label, inv, particulars)
+
+
+def _render_understanding(res: dict, nested: bool = False) -> None:
     """Show the summary + extracted structured fields, when computed."""
     u = res.get("understanding") or {}
     summary = (u.get("summary") or "").strip()
@@ -241,14 +494,26 @@ def _render_understanding(res: dict) -> None:
     ocr_json = res.get("ocr_json") or {}
     blocks = ocr_json.get("blocks") or []
     if blocks:
-        with st.expander(f"🔎 OCR regions — {ocr_json.get('engine', 'ocr')} "
-                         f"({len(blocks)} blocks)"):
+        with _collapsible(f"🔎 OCR regions — {ocr_json.get('engine', 'ocr')} "
+                          f"({len(blocks)} blocks)", nested):
             st.caption("Structured OCR output: each detected region with its text, "
                        "bounding box, confidence and label. Copy the code below or "
                        "use the download button — both are exact.")
             # st.code (not st.json) so copied text matches the file byte-for-byte;
             # the interactive JSON tree annotates whole-number floats when copied.
             st.code(json.dumps(ocr_json, indent=2, ensure_ascii=False), language="json")
+
+    ocr_json_en = res.get("ocr_json_en") or {}
+    blocks_en = ocr_json_en.get("blocks") or []
+    if blocks_en:
+        with _collapsible(f"🌐 OCR regions, English — {ocr_json_en.get('engine', 'ocr')} "
+                          f"({len(blocks_en)} blocks)", nested):
+            st.caption("The same OCR regions with non-English text translated to "
+                       "English inline. Each block keeps its bounding box and "
+                       "confidence; the source string is preserved as "
+                       "\"text_original\". Machine translation — verify important "
+                       "values against the document.")
+            st.code(json.dumps(ocr_json_en, indent=2, ensure_ascii=False), language="json")
 
 
 def _safe_stem(label: str) -> str:
@@ -261,7 +526,9 @@ def _render_downloads(label: str, res: dict) -> None:
     scan_png = _png_bytes(res["cleaned"])
     ocr_json = res.get("ocr_json") or {}
     has_ocr_json = bool(ocr_json.get("blocks"))
-    cols = st.columns(5)
+    ocr_json_en = res.get("ocr_json_en") or {}
+    has_ocr_json_en = bool(ocr_json_en.get("blocks"))
+    cols = st.columns(6)
     cols[0].download_button("⬇️ Scan (PNG)", scan_png, file_name=f"{stem}.png",
                             mime="image/png", key=f"png_{stem}")
     cols[1].download_button("⬇️ Result (JSON)",
@@ -278,12 +545,22 @@ def _render_downloads(label: str, res: dict) -> None:
             help="Raw structured output of the OCR model: each detected region with "
                  "its text, bounding box, confidence and label.",
         )
+    if has_ocr_json_en:
+        cols[3].download_button(
+            "⬇️ OCR JSON (English)",
+            json.dumps(ocr_json_en, indent=2, ensure_ascii=False),
+            file_name=f"{stem}_ocr_en.json", mime="application/json",
+            key=f"ocrjsonen_{stem}",
+            help="The OCR JSON with non-English text translated to English inline. "
+                 "Same regions/bounding boxes; each block keeps the source string as "
+                 "\"text_original\".",
+        )
     if res.get("pdf"):
-        cols[3].download_button("⬇️ Searchable PDF", res["pdf"],
+        cols[4].download_button("⬇️ Searchable PDF", res["pdf"],
                                 file_name=f"{stem}.pdf", mime="application/pdf",
                                 key=f"pdf_{stem}")
     if res.get("text"):
-        cols[4].download_button("⬇️ Text (TXT)", res["text"],
+        cols[5].download_button("⬇️ Text (TXT)", res["text"],
                                 file_name=f"{stem}.txt", mime="text/plain",
                                 key=f"txt_{stem}")
 
@@ -292,7 +569,13 @@ def _batch_zip(results: list[tuple[str, dict]]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for label, res in results:
-            zf.writestr(f"{_safe_stem(label)}.png", _png_bytes(res["cleaned"]))
+            stem = _safe_stem(label)
+            thumbs = res.get("doc_pages")
+            if thumbs and len(thumbs) > 1:
+                for i, page in enumerate(thumbs, 1):
+                    zf.writestr(f"{stem}_p{i}.png", _png_bytes(page))
+            else:
+                zf.writestr(f"{stem}.png", _png_bytes(res["cleaned"]))
     return buf.getvalue()
 
 
@@ -339,6 +622,32 @@ with st.sidebar:
         st.caption("✨ Gemini summaries active." if gemini_on
                    else "ℹ️ No GEMINI_API_KEY — using offline summary + extraction.")
 
+    want_translate = st.toggle(
+        "Translate OCR to English",
+        value=False,
+        disabled=not (any_ocr and gemini_on),
+        help="Produce a second OCR JSON where non-English text (Hindi, Marwari, "
+             "Kannada, …) is translated to English inline — same regions, same "
+             "bounding boxes, English substituted for the source text. Requires "
+             "a GEMINI_API_KEY."
+             if any_ocr else "Needs an OCR engine to read the text first.",
+    )
+    if want_translate and not gemini_on:
+        st.caption("ℹ️ Translation needs a GEMINI_API_KEY.")
+
+    want_invoice = st.toggle(
+        "Extract invoice → Excel",
+        value=False,
+        disabled=not (any_ocr and gemini_on),
+        help="Read each invoice/bill (any language) and extract invoice no, date, "
+             "party name & address, total, and a line-item table (item + quantity, "
+             "with item names translated to English). Download all invoices as one "
+             "Excel workbook — one sheet per invoice. Requires a GEMINI_API_KEY."
+             if any_ocr else "Needs an OCR engine to read the text first.",
+    )
+    if want_invoice and not gemini_on:
+        st.caption("ℹ️ Invoice extraction needs a GEMINI_API_KEY.")
+
     # Classification OCR engine (fuses keyword signals into CLIP). Surya is an
     # opt-in, higher-accuracy engine; offered only when installed.
     if _surya_available():
@@ -367,23 +676,33 @@ if not uploaded and camera is None:
     st.stop()
 
 try:
-    pages = _gather_pages(uploaded, camera)
+    documents = _gather_documents(uploaded, camera)
 except ImageDecodeError as e:
     st.error(str(e))
     st.stop()
 
+# Invoice extraction depends on high-quality OCR regions, so use Surya when it's
+# installed regardless of the classification-engine radio (Tesseract mangles
+# handwritten regional text and yields nothing to extract).
+proc_engine = ocr_engine
+if want_invoice and _surya_available() and ocr_engine != "surya":
+    proc_engine = "surya"
+    st.caption("🧾 Invoice mode: using Surya OCR for accurate region extraction.")
+
 results: list[tuple[str, dict]] = []
 errors: list[tuple[str, str]] = []
 progress = st.progress(0.0, text="Processing…")
-for i, (label, data) in enumerate(pages, 1):
+for i, (label, kind, pages_bytes) in enumerate(documents, 1):
     try:
-        results.append((label, _process_page(data, binarize, want_exports, ocr_engine,
-                                              want_understanding)))
+        results.append((label, _process_document(kind, pages_bytes, binarize,
+                                                  want_exports, proc_engine,
+                                                  want_understanding, want_translate,
+                                                  want_invoice)))
     except ImageDecodeError as e:
         errors.append((label, str(e)))
     except Exception as e:  # pragma: no cover - defensive UI guard
         errors.append((label, f"Unexpected error: {e}"))
-    progress.progress(i / len(pages), text=f"Processing… ({i}/{len(pages)})")
+    progress.progress(i / len(documents), text=f"Processing… ({i}/{len(documents)})")
 progress.empty()
 
 for label, msg in errors:
@@ -392,12 +711,29 @@ for label, msg in errors:
 if not results:
     st.stop()
 
+# Invoice → Excel: collect every document that yielded structured invoice data
+# into one workbook (one sheet per invoice) and offer it as a single download.
+invoices = [(label, r["invoice"]) for label, r in results if r.get("invoice")]
+if want_invoice:
+    if invoices:
+        st.download_button(
+            f"⬇️ Download invoices (Excel) — {len(invoices)} invoice"
+            f"{'s' if len(invoices) != 1 else ''}, one row per line item",
+            invoice_workbook(invoices),
+            file_name="invoices.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="invoices_xlsx",
+        )
+    else:
+        st.info("No invoice data could be extracted (Gemini may be busy — try again, "
+                "or check that the uploads are invoices/bills).")
+
 # Single document -> detailed view. Multiple -> summary table + per-doc expanders.
 if len(results) == 1:
     st.subheader("Result")
     _render_detail(*results[0])
 else:
-    st.subheader(f"Results — {len(results)} pages")
+    st.subheader(f"Results — {len(results)} documents")
     st.dataframe(
         [
             {
@@ -417,4 +753,4 @@ else:
                        file_name="scans.zip", mime="application/zip")
     for label, r in results:
         with st.expander(label):
-            _render_detail(label, r)
+            _render_detail(label, r, nested=True)
