@@ -1,0 +1,42 @@
+{
+  "_comment": "Item knowledge graph. Nodes = items + categories; items resolve any-language alias -> canonical entity; is_a edges (item.category, category.parent) roll up to procurement categories. Grow this file: add aliases (any script/transliteration) and new items. 'edges' holds extra typed relations (synonym_of, substitute_for, part_of) for future use.",
+  "categories": {
+    "CAT_FURNITURE": {"name": "Furniture", "parent": null},
+    "CAT_SEATING":   {"name": "Seating",   "parent": "CAT_FURNITURE"},
+    "CAT_STORAGE":   {"name": "Storage",   "parent": "CAT_FURNITURE"},
+    "CAT_SURFACE":   {"name": "Surfaces",  "parent": "CAT_FURNITURE"},
+    "CAT_OPENING":   {"name": "Openings",  "parent": "CAT_FURNITURE"},
+    "CAT_BEDDING":   {"name": "Bedding",   "parent": "CAT_FURNITURE"},
+    "CAT_MATERIAL":  {"name": "Materials", "parent": null},
+    "CAT_HARDWARE":  {"name": "Hardware",  "parent": null},
+    "CAT_SERVICE":   {"name": "Services",  "parent": null}
+  },
+  "items": {
+    "ITEM_CHAIR":    {"name": "Chair",    "erp": "FURN-CHAIR",    "category": "CAT_SEATING",  "aliases": ["chair", "कुर्सी", "कुरसी", "kursi"]},
+    "ITEM_SOFA":     {"name": "Sofa",     "erp": "FURN-SOFA",     "category": "CAT_SEATING",  "aliases": ["sofa", "सोफा", "सोफ़ा"]},
+    "ITEM_ALMIRAH":  {"name": "Almirah",  "erp": "FURN-ALMIRAH",  "category": "CAT_STORAGE",  "aliases": ["almirah", "अलमारी", "आलमारी", "almari"]},
+    "ITEM_CUPBOARD": {"name": "Cupboard", "erp": "FURN-CUPBOARD", "category": "CAT_STORAGE",  "aliases": ["cupboard", "कपबोर्ड", "कबर्ड"]},
+    "ITEM_SHELF":    {"name": "Shelf",    "erp": "FURN-SHELF",    "category": "CAT_STORAGE",  "aliases": ["shelf", "rack", "शेल्फ", "ताक", "रैक"]},
+    "ITEM_TABLE":    {"name": "Table",    "erp": "FURN-TABLE",    "category": "CAT_SURFACE",  "aliases": ["table", "मेज", "मेज़", "टेबल", "mez"]},
+    "ITEM_DESK":     {"name": "Desk",     "erp": "FURN-DESK",     "category": "CAT_SURFACE",  "aliases": ["desk", "डेस्क"]},
+    "ITEM_COUNTER":  {"name": "Counter",  "erp": "FURN-COUNTER",  "category": "CAT_SURFACE",  "aliases": ["counter", "काउंटर", "काउन्टर"]},
+    "ITEM_DOOR":     {"name": "Door",     "erp": "FURN-DOOR",     "category": "CAT_OPENING",  "aliases": ["door", "दरवाजा", "दरवाज़ा", "द्वार", "darwaza"]},
+    "ITEM_WINDOW":   {"name": "Window",   "erp": "FURN-WINDOW",   "category": "CAT_OPENING",  "aliases": ["window", "खिड़की", "खिडकी", "khidki"]},
+    "ITEM_BED":      {"name": "Bed",      "erp": "FURN-BED",      "category": "CAT_BEDDING",  "aliases": ["bed", "पलंग", "बिस्तर", "palang"]},
+    "ITEM_PLYWOOD":  {"name": "Plywood",  "erp": "FURN-PLYWOOD",  "category": "CAT_MATERIAL", "aliases": ["plywood", "ply", "प्लाईवुड", "प्लाइवुड", "प्लाई"]},
+    "ITEM_GLASS":    {"name": "Glass",    "erp": "FURN-GLASS",    "category": "CAT_MATERIAL", "aliases": ["glass", "कांच", "काँच", "शीशा", "ग्लास", "kanch"]},
+    "ITEM_MIRROR":   {"name": "Mirror",   "erp": "FURN-MIRROR",   "category": "CAT_MATERIAL", "aliases": ["mirror", "आईना", "दर्पण", "aaina", "darpan"]},
+    "ITEM_HINGE":    {"name": "Hinge",    "erp": "HW-HINGE",      "category": "CAT_HARDWARE", "aliases": ["hinge", "कब्जा", "कब्ज़ा", "हिंज", "kabza"]},
+    "ITEM_HANDLE":   {"name": "Handle",   "erp": "HW-HANDLE",     "category": "CAT_HARDWARE", "aliases": ["handle", "हैंडल", "कुंडी", "kundi"]},
+    "ITEM_SCREW":    {"name": "Screw",    "erp": "HW-SCREW",      "category": "CAT_HARDWARE", "aliases": ["screw", "पेंच", "पेच", "स्क्रू", "pech"]},
+    "ITEM_NAIL":     {"name": "Nail",     "erp": "HW-NAIL",       "category": "CAT_HARDWARE", "aliases": ["nail", "कील", "कीला", "keel"]},
+    "ITEM_LOCK":     {"name": "Lock",     "erp": "HW-LOCK",       "category": "CAT_HARDWARE", "aliases": ["lock", "ताला", "लॉक", "tala"]},
+    "ITEM_LABOUR":   {"name": "Labour Charges", "erp": "SVC-LABOUR", "category": "CAT_SERVICE", "aliases": ["labour", "labor", "labour charges", "मजदूरी", "मज़दूरी", "लेबर", "मेहनताना", "mazdoori"]},
+    "ITEM_FITTING":  {"name": "Fitting Work",   "erp": "SVC-FITTING","category": "CAT_SERVICE", "aliases": ["fitting", "fitting work", "फिटिंग", "फिटींग"]},
+    "ITEM_REPAIR":   {"name": "Repair",   "erp": "SVC-REPAIR",    "category": "CAT_SERVICE",  "aliases": ["repair", "मरम्मत", "रिपेयर", "marammat"]},
+    "ITEM_POLISH":   {"name": "Polish",   "erp": "SVC-POLISH",    "category": "CAT_SERVICE",  "aliases": ["polish", "पॉलिश", "पालिश"]},
+    "ITEM_PAINT":    {"name": "Paint",    "erp": "SVC-PAINT",     "category": "CAT_SERVICE",  "aliases": ["paint", "पेंट", "रंग", "पैंट", "rang"]},
+    "ITEM_FURNWORK": {"name": "Furniture Work", "erp": "SVC-FURNITURE-WORK", "category": "CAT_SERVICE", "aliases": ["furniture", "furniture work", "फर्नीचर", "फ़र्नीचर"]}
+  },
+  "edges": []
+}

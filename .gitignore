@@ -23,3 +23,7 @@ eval/results/
 
 # scratch/debug logs
 scratch_*.log
+scratch_port.txt
+
+# exported annotation crops (regenerate via training/export_line_crops.py)
+training/crops/
